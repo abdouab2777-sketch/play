@@ -23,19 +23,28 @@ PROOF_CHAT_ID = -1004477473385
 MAINTENANCE_MODE = False
 MAINTENANCE_MESSAGE = "⚠️ البوت حاليا في وضع الصيانة، حاول لاحقا."
 
-# تعريف البوت
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+# إعداد معالج أخطاء مخصص لطباعة أي مشكلة بوضوح في سجلات Render
+class BotExceptionHandler(telebot.ExceptionHandler):
+    def handle(self, exception):
+        logging.error(f"❌ خطأ داخلي في البوت: {exception}", exc_info=True)
+        return True
+
+# ⚡ الحل السحري: تعطيل التخييط (threaded=False) ليعمل البوت بشكل متزامن مع Gunicorn ⚡
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=False, exception_handler=BotExceptionHandler())
 
 # إعداد سيرفر Flask لـ Render
 app = Flask(__name__)
 
-# جلب رابط الويب الخاص بك تلقائياً من بيئة Render
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://google-play-point.onrender.com")
+# جلب رابط الويب الخاص بك تلقائياً، مع وضع رابطك الفعلي كاحتياطي مضمون
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://djezzy-xpqu.onrender.com")
 
 # ==================== إعداد الويب هوك (Webhook) ====================
 @app.route('/')
 def home():
     try:
+        # نقوم بمسح الويب هوك القديم أولاً ثم إعادة تعيينه لضمان التحديث التام
+        bot.remove_webhook()
+        time.sleep(0.1)
         bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
         return "🚀 Djezzy Telegram Bot is Live & Running on Render using Webhooks!", 200
     except Exception as e:
@@ -105,7 +114,7 @@ for filename in [REGISTERED_NUMBERS_FILE, REGISTERED_USERS_FILE, CHANNELS_FILE, 
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    handlers=[logging.FileHandler('djezzy_bot.log'), logging.StreamHandler()]
+    handlers=[logging.FileHandler('djezzy_bot.log'), logging.StreamHandler(sys.stdout)]
 )
 
 session = requests.Session()
@@ -125,9 +134,11 @@ def load_user_db():
         try:
             if os.path.exists(USER_DATA_FILE):
                 with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
         except Exception as e:
-            logging.error(f"Error loading user DB: {e}")
+            logging.error(f"Error loading user DB: {e}", exc_info=True)
         return {}
 
 def save_user_db(db):
@@ -138,7 +149,7 @@ def save_user_db(db):
                 json.dump(db, f, ensure_ascii=False, indent=2)
             os.replace(temp_file, USER_DATA_FILE)
         except Exception as e:
-            logging.error(f"Error saving user DB: {e}")
+            logging.error(f"Error saving user DB: {e}", exc_info=True)
 
 def set_user_state(chat_id, state):
     db = load_user_db()
@@ -199,18 +210,25 @@ def save_json_file(filename, data):
 
 def add_user_to_db(user_id, username):
     users = load_json_file(REGISTERED_USERS_FILE, [])
-    exists = any(str(u.get('id')) == str(user_id) for u in users if isinstance(u, dict))
+    migrated_users = []
+    for u in users:
+        if isinstance(u, dict):
+            migrated_users.append(u)
+        elif isinstance(u, int):
+            migrated_users.append({'id': u, 'username': 'unknown', 'date': datetime.now().strftime("%Y-%m-%d")})
+    
+    exists = any(str(u.get('id')) == str(user_id) for u in migrated_users)
     if not exists:
-        users.append({'id': user_id, 'username': username or 'No Username', 'date': datetime.now().strftime("%Y-%m-%d")})
-        save_json_file(REGISTERED_USERS_FILE, users)
+        migrated_users.append({'id': user_id, 'username': username or 'No Username', 'date': datetime.now().strftime("%Y-%m-%d")})
+        save_json_file(REGISTERED_USERS_FILE, migrated_users)
 
 def clean_expired_cache():
     current_time = time.time()
     for k, v in list(otp_cache_dict.items()):
-        if current_time - v.get('timestamp', 0) > 60:
+        if isinstance(v, dict) and current_time - v.get('timestamp', 0) > 60:
             otp_cache_dict.pop(k, None)
     for k, v in list(token_cache_dict.items()):
-        if current_time - v.get('timestamp', 0) > 3600:
+        if isinstance(v, dict) and current_time - v.get('timestamp', 0) > 3600:
             token_cache_dict.pop(k, None)
 
 def format_num(phone):
@@ -239,7 +257,6 @@ def request_otp(msisdn):
     cache_key = f"otp_{msisdn}"
     if cache_key in otp_cache_dict: return True
 
-    # ⚡ قمنا بتمرير البارامترات مباشرة في الرابط كما هي في سكريبتك الشغال لضمان القبول الفوري ⚡
     url = f"{BASE_URL}/oauth2/registration?msisdn={msisdn}&client_id={CLIENT_ID}&scope=smsotp"
     payload = {"consent-agreement": [{"marketing-notifications": False}], "is-consent": True}
     
