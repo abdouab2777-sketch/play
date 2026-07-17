@@ -4,13 +4,13 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-# --- الإعدادات ---
-PAGE_ACCESS_TOKEN = "EAAXmzOXloWcBR3oY3nA5Kcu1YAtF9vZCqOZA4pEyIitXFLKDA5haz1tDVZAzTKO5ZAr1oXEuLVZC1MXT5ZA53lO6XC9R9TrB3zSNEYcQklgH2tWmUrUZAZACE7uQ1Fd5FK6nSSGeT7twfLyykMh6pZBAholAQvKhoD5ELSXChHmMPLX2lPb6JCZBE4WeZCGsaNaXiI1"
-PAGE_ID = "4674795799410539" # معرف صفحتك الثابت
-VERIFY_TOKEN = "yakoub123" # الرمز الذي وضعته في فيسبوك
+# --- الإعدادات الصحيحة والنهائية لصفحة Google play point ---
+PAGE_ACCESS_TOKEN = "EAAXmzOXloWcBRzSNXpcmen2bWOnhZC4hs9JF2z0tJVKgaaVZAvsTRerB9ZAnqfZAG5AfG0UKHKPVWf0kfxzNdaXEQfaGXwuhLEPs34KuYR6YigQZBFzLq1RMo9qWdxAuzEXD3xtxu5BqPjISA78a8tRKu283g0IBFCZAnqcJIZAgzVZBegyMDt4GYAbFrf7lqqlocozqemLK"
+PAGE_ID = "1250641121458104" 
+VERIFY_TOKEN = "yakoub123"
 
 def send_messenger_message(recipient_id, text_reply):
-    """إرسال الرد التلقائي باستخدام معرف الصفحة مباشرة لتفادي الأخطاء"""
+    """إرسال الرد التلقائي باستخدام معرف الصفحة المباشر لتفادي أخطاء الصلاحيات"""
     url = f"https://graph.facebook.com/v16.0/{PAGE_ID}/messages?access_token={PAGE_ACCESS_TOKEN}"
     payload = {
         "recipient": {"id": recipient_id},
@@ -29,7 +29,7 @@ def send_messenger_message(recipient_id, text_reply):
 
 @app.route('/', methods=['GET'])
 def index():
-    return "🚀 البوت يعمل الآن وبكل كفاءة!"
+    return "🚀 البوت يعمل الآن وبكل كفاءة لصفحة Google Play Point!"
 
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
@@ -44,10 +44,10 @@ def webhook():
         else:
             return "Forbidden", 403
 
-    # 2. استقبال الرسائل (POST)
+    # 2. استقبال الرسائل والرد (POST)
     if request.method == 'POST':
         data = request.json
-        if data.get('object') == 'page':
+        if data and data.get('object') == 'page':
             for entry in data.get('entry', []):
                 for messaging_event in entry.get('messaging', []):
                     # نتحقق أن الرسالة ليست مرسلة من البوت نفسه
@@ -61,10 +61,10 @@ def webhook():
                         user_msg = message_text.lower()
                         reply = ""
                         
-                        if any(word in user_msg for word in ["مرحبا", "هلا", "hi"]):
-                            reply = "أهلاً بك يا غالي! كيف يمكنني مساعدتك اليوم؟ 😊"
+                        if any(word in user_msg for word in ["مرحبا", "هلا", "hi", "السلام"]):
+                            reply = "أهلاً بك في صفحة Google Play Point! كيف يمكنني مساعدتك اليوم؟ 😊"
                         elif "البوت" in user_msg:
-                            reply = "أنا بوت ذكي يعمل بنظام بايثون ومستضاف على خادم سحابي 24/7! 🚀"
+                            reply = "أنا بوت ذكي يعمل بنظام بايثون لخدمة زوار الصفحة 24/7! 🚀"
                         elif "سؤال جاهز" in user_msg:
                             reply = "جاري معالجة سؤالك يا بطل، لحظات وأرد عليك!"
                         else:
