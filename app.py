@@ -12,16 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 import telebot
 from telebot import types
-from flask import Flask
+from flask import Flask, request
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
-# ==================== إعداد سيرفر Flask لـ Render ====================
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "🚀 Djezzy Telegram Bot is Live & Running on Render!"
 
 # ==================== التكوين الأساسي للبوت ====================
 BOT_TOKEN = "8320518146:AAHNSvwvKgjH_G_YHadfPHgXqz60QrALq9s"
@@ -30,14 +23,38 @@ PROOF_CHAT_ID = -1004477473385
 MAINTENANCE_MODE = False
 MAINTENANCE_MESSAGE = "⚠️ البوت حاليا في وضع الصيانة، حاول لاحقا."
 
-# تعريف البوت فوراً
+# تعريف البوت
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-# البروكسي (معطل)
+# إعداد سيرفر Flask لـ Render
+app = Flask(__name__)
+
+# جلب رابط الويب الخاص بك تلقائياً من بيئة Render
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://google-play-point.onrender.com")
+
+# ==================== إعداد الويب هوك (Webhook) ====================
+@app.route('/')
+def home():
+    try:
+        bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
+        return "🚀 Djezzy Telegram Bot is Live & Running on Render using Webhooks!", 200
+    except Exception as e:
+        return f"⚠️ Bot is running, but Webhook failed to set: {e}", 500
+
+@app.route('/' + BOT_TOKEN, methods=['POST'])
+def get_telegram_message():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return "OK", 200
+    else:
+        return "Forbidden", 403
+
+# ==================== إعدادات جيزي والملفات ====================
 USE_PROXY = False
 PROXIES = None
 
-# ==================== العروض المتاحة ====================
 OFFER_CODES = {
     'offer_1': "GIFTWALKWIN2GO",
     'offer_2': "BTLINTSPEEDDAY2Go",
@@ -62,7 +79,6 @@ ALL_OFFERS = {
     'offer_9': {'offer_id': "offer_9", 'name': "👑 IMTIYAZ 2000DA", 'code': OFFER_CODES['offer_9'], 'amount': "70GB", 'type': "paid", 'price': "2000 DA", 'duration': "30 يوم"}
 }
 
-# ==================== الإعدادات والأقسام ====================
 HEADERS = {
     'User-Agent': "MobileApp/3.0.0",
     'Accept': "application/json",
@@ -78,14 +94,13 @@ BASE_URL = "https://apim.djezzy.dz/mobile-api"
 REGISTERED_NUMBERS_FILE = "registered_numbers.json"
 REGISTERED_USERS_FILE = "registered_users.json"
 CHANNELS_FILE = "channels.json"
+USER_DATA_FILE = "user_db.json"
 
-# تهيئة ملف القنوات وتفريغه عند البدء
-if os.path.exists(CHANNELS_FILE):
-    with open(CHANNELS_FILE, 'w', encoding='utf-8') as f:
-        json.dump([], f, ensure_ascii=False, indent=2)
-else:
-    with open(CHANNELS_FILE, 'w', encoding='utf-8') as f:
-        json.dump([], f, ensure_ascii=False, indent=2)
+# تهيئة وتأمين الملفات المحلية
+for filename in [REGISTERED_NUMBERS_FILE, REGISTERED_USERS_FILE, CHANNELS_FILE, USER_DATA_FILE]:
+    if not os.path.exists(filename):
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump({} if filename == USER_DATA_FILE else [], f, ensure_ascii=False, indent=2)
 
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -93,31 +108,75 @@ logging.basicConfig(
     handlers=[logging.FileHandler('djezzy_bot.log'), logging.StreamHandler()]
 )
 
-# إعداد الجلسة والطلبات
 session = requests.Session()
-retry_strategy = Retry(
-    total=3,
-    backoff_factor=1,
-    status_forcelist=[429, 500, 502, 503, 504],
-)
+retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
 adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("http://", adapter)
 session.mount("https://", adapter)
 
-# التخزين المؤقت في الذاكرة
 otp_cache_dict = {}
 token_cache_dict = {}
-user_states = {}
-user_sessions = {}
-user_numbers = {}
 data_lock = threading.Lock()
-
 executor = ThreadPoolExecutor(max_workers=50)
 
-# ==================== دوال الملفات المساعدة ====================
+# ==================== إدارة قاعدة البيانات المحلية ومقاومة النوم ====================
+def load_user_db():
+    with data_lock:
+        try:
+            if os.path.exists(USER_DATA_FILE):
+                with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading user DB: {e}")
+        return {}
+
+def save_user_db(db):
+    with data_lock:
+        try:
+            temp_file = f"{USER_DATA_FILE}.tmp"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(db, f, ensure_ascii=False, indent=2)
+            os.replace(temp_file, USER_DATA_FILE)
+        except Exception as e:
+            logging.error(f"Error saving user DB: {e}")
+
+def set_user_state(chat_id, state):
+    db = load_user_db()
+    if str(chat_id) not in db:
+        db[str(chat_id)] = {}
+    db[str(chat_id)]['state'] = state
+    save_user_db(db)
+
+def set_user_phone(chat_id, phone):
+    db = load_user_db()
+    if str(chat_id) not in db:
+        db[str(chat_id)] = {}
+    db[str(chat_id)]['phone'] = phone
+    save_user_db(db)
+
+def set_user_session(chat_id, token, phone, display_phone):
+    db = load_user_db()
+    db[str(chat_id)] = {
+        'state': "LOGGED_IN",
+        'phone': phone,
+        'session': {
+            'token': token,
+            'phone': phone,
+            'display_phone': display_phone
+        }
+    }
+    save_user_db(db)
+
+def delete_user_session(chat_id):
+    db = load_user_db()
+    if str(chat_id) in db:
+        db[str(chat_id)].pop('session', None)
+        db[str(chat_id)]['state'] = "WAITING_PHONE"
+    save_user_db(db)
+
+# ==================== دوال الملفات المساعدة المتبقية ====================
 def load_json_file(filename, default=None):
-    if default is None:
-        default = []
+    if default is None: default = []
     try:
         if os.path.exists(filename):
             with open(filename, 'r', encoding='utf-8') as f:
@@ -163,33 +222,30 @@ def format_num(phone):
     return phone
 
 def format_phone(phone):
-    if phone.startswith('0'):
-        return phone
+    if phone.startswith('0'): return phone
     return "0" + phone[3:]
 
 def mask_phone(phone):
-    if len(phone) >= 10:
-        return phone[:4] + "****" + phone[-2:]
+    if len(phone) >= 10: return phone[:4] + "****" + phone[-2:]
     return phone
 
 def generate_random_djezzy_no():
     prefix = random.choice(["077", "078", "079"])
     return prefix + "".join([str(random.randint(0, 9)) for _ in range(7)])
 
-# ==================== دوال API الخاصة بجيزي ====================
+# ==================== استدعاءات API جيزي (مطابقة تماماً لسكريبتك الشغال) ====================
 def request_otp(msisdn):
     clean_expired_cache()
     cache_key = f"otp_{msisdn}"
-    if cache_key in otp_cache_dict:
-        return True
+    if cache_key in otp_cache_dict: return True
 
-    url = f"{BASE_URL}/oauth2/registration"
-    params = {'msisdn': msisdn, 'client_id': CLIENT_ID, 'scope': "smsotp"}
+    # ⚡ قمنا بتمرير البارامترات مباشرة في الرابط كما هي في سكريبتك الشغال لضمان القبول الفوري ⚡
+    url = f"{BASE_URL}/oauth2/registration?msisdn={msisdn}&client_id={CLIENT_ID}&scope=smsotp"
     payload = {"consent-agreement": [{"marketing-notifications": False}], "is-consent": True}
     
     for _ in range(3):
         try:
-            response = session.post(url, params=params, json=payload, headers=HEADERS, proxies=PROXIES, timeout=12)
+            response = session.post(url, json=payload, headers=HEADERS, proxies=PROXIES, timeout=12)
             if response.status_code in [200, 201, 202]:
                 otp_cache_dict[cache_key] = {'timestamp': time.time()}
                 return True
@@ -201,8 +257,7 @@ def request_otp(msisdn):
 def login_with_otp(msisdn, otp):
     clean_expired_cache()
     cache_key = f"token_{msisdn}_{otp}"
-    if cache_key in token_cache_dict:
-        return token_cache_dict[cache_key]['token']
+    if cache_key in token_cache_dict: return token_cache_dict[cache_key]['token']
 
     url = f"{BASE_URL}/oauth2/token"
     payload = {
@@ -229,31 +284,21 @@ def login_with_otp(msisdn, otp):
 def get_sim_info(token):
     try:
         url = f"{BASE_URL}/api/v1/account/summary"
-        headers_with_auth = {**HEADERS, 'authorization': token}
-        response = session.get(url, headers=headers_with_auth, proxies=PROXIES, timeout=10)
+        response = session.get(url, headers={**HEADERS, 'authorization': token}, proxies=PROXIES, timeout=10)
         if response.status_code == 200:
             data = response.json()
             balance = data.get('balance', {}).get('availableBalance', 'غير معروف')
             msisdn = data.get('msisdn', 'غير معروف')
             packages = data.get('activePackages', [])
-            package_list = []
-            for p in packages:
-                name = p.get('name', '')
-                expiry = p.get('expiryDate', '')
-                package_list.append({'name': name, 'expiry': expiry})
-            return {
-                'balance': balance,
-                'msisdn': msisdn,
-                'packages': package_list
-            }
+            package_list = [{'name': p.get('name', ''), 'expiry': p.get('expiryDate', '')} for p in packages]
+            return {'balance': balance, 'msisdn': msisdn, 'packages': package_list}
     except Exception as e:
         logging.error(f"خطأ في جلب معلومات الشريحة: {e}")
     return None
 
 def get_balance(token, phone):
     try:
-        headers_with_auth = {**HEADERS, 'authorization': token}
-        response_main = session.get(f"{BASE_URL}/api/v1/subscribers/main-balance/{phone}", headers=headers_with_auth, proxies=PROXIES, timeout=12)
+        response_main = session.get(f"{BASE_URL}/api/v1/subscribers/main-balance/{phone}", headers={**HEADERS, 'authorization': token}, proxies=PROXIES, timeout=12)
         if response_main.status_code == 200:
             data = response_main.json()
             balance = data.get('data', {}).get('mainBalance', 0)
@@ -263,21 +308,17 @@ def get_balance(token, phone):
     except:
         return False, "❌ خطأ في الاتصال بالسيرفر"
 
-# ==================== تفعيل العروض ====================
 def activate_2go(token, phone):
     url = f"{BASE_URL}/api/v1/services/walk/activate-reward/{phone}"
     payload = {"packageCode": "GIFTWALKWIN2GO"}
     try:
         r = session.post(url, json=payload, headers={**HEADERS, 'authorization': token}, proxies=PROXIES, timeout=10)
-        if r.status_code in [200, 201, 202]:
-            return True, None
-        else:
-            try:
-                error_json = r.json()
-                error_msg = error_json.get('message') or error_json.get('error') or r.text
-            except:
-                error_msg = r.text
-            return False, error_msg
+        if r.status_code in [200, 201, 202]: return True, None
+        try:
+            err = r.json().get('message') or r.json().get('error') or r.text
+        except:
+            err = r.text
+        return False, err
     except Exception as e:
         return False, str(e)
 
@@ -285,66 +326,46 @@ def activate_product_offer(token, phone, package_code):
     url = f"{BASE_URL}/api/v1/subscribers/activate-product/{phone}"
     payload = {"packageCode": package_code}
     try:
-        headers_with_auth = {**HEADERS, 'authorization': token}
-        response = session.post(url, json=payload, headers=headers_with_auth, proxies=PROXIES, timeout=12)
-        if response.status_code in [200, 201, 202]:
-            return True, None
-        else:
-            try:
-                error_json = response.json()
-                error_msg = error_json.get('message') or error_json.get('error') or response.text
-            except:
-                error_msg = response.text
-            return False, error_msg
+        response = session.post(url, json=payload, headers={**HEADERS, 'authorization': token}, proxies=PROXIES, timeout=12)
+        if response.status_code in [200, 201, 202]: return True, None
+        try:
+            err = response.json().get('message') or response.json().get('error') or response.text
+        except:
+            err = response.text
+        return False, err
     except Exception as e:
         return False, str(e)
 
-# ==================== نظام الدعوات MGM ====================
+# ==================== نظام MGM ====================
 def send_invitation(token, sender, receiver):
     try:
-        inv = session.post(
-            f"{BASE_URL}/api/v1/services/mgm/send-invitation/{sender}",
-            json={"msisdnReciever": receiver},
-            headers={**HEADERS, 'authorization': token},
-            proxies=PROXIES,
-            timeout=10
-        )
+        inv = session.post(f"{BASE_URL}/api/v1/services/mgm/send-invitation/{sender}", json={"msisdnReciever": receiver}, headers={**HEADERS, 'authorization': token}, proxies=PROXIES, timeout=10)
         return inv.status_code in [200, 201]
-    except:
-        return False
+    except: return False
 
 def get_invitations(token, msisdn):
     try:
-        headers = {**HEADERS, "authorization": token}
-        res = session.get(f"{BASE_URL}/api/v1/services/mgm/invitations/{msisdn}", headers=headers, proxies=PROXIES, timeout=10)
+        res = session.get(f"{BASE_URL}/api/v1/services/mgm/invitations/{msisdn}", headers={**HEADERS, "authorization": token}, proxies=PROXIES, timeout=10)
         if res.status_code == 200:
-            all_inv = res.json().get("data", {}).get("invitations", [])
-            return [inv for inv in all_inv if inv.get("status") == "PENDING"]
-    except:
-        pass
+            return [inv for inv in res.json().get("data", {}).get("invitations", []) if inv.get("status") == "PENDING"]
+    except: pass
     return []
 
 def delete_invitation(token, msisdn, receiver):
     try:
-        headers = {**HEADERS, "authorization": token}
-        session.post(f"{BASE_URL}/api/v1/services/mgm/delete-invitation/{msisdn}", json={"msisdnReceiver": receiver}, headers=headers, proxies=PROXIES, timeout=10)
-    except:
-        pass
+        session.post(f"{BASE_URL}/api/v1/services/mgm/delete-invitation/{msisdn}", json={"msisdnReceiver": receiver}, headers={**HEADERS, "authorization": token}, proxies=PROXIES, timeout=10)
+    except: pass
 
 def activate_reward_mgm(token, msisdn):
     try:
-        headers = {**HEADERS, "authorization": token}
-        res = session.post(f"{BASE_URL}/api/v1/services/mgm/activate-reward/{msisdn}", json={"packageCode": "MGMBONUS1Go"}, headers=headers, proxies=PROXIES, timeout=10)
+        res = session.post(f"{BASE_URL}/api/v1/services/mgm/activate-reward/{msisdn}", json={"packageCode": "MGMBONUS1Go"}, headers={**HEADERS, "authorization": token}, proxies=PROXIES, timeout=10)
         data = res.json() if res.status_code in [200, 201] else {}
         msg = data.get("message", {})
         ar = msg.get("ar", "") if isinstance(msg, dict) else str(msg)
-        if res.status_code in [200, 201]:
-            return True, ar or "تم التفعيل"
-        return False, ar or "لا توجد مكافأة"
-    except:
-        return False, "خطأ في الاتصال"
+        return res.status_code in [200, 201], ar or "تم التفعيل"
+    except: return False, "خطأ في الاتصال"
 
-def handle_mgm_flow(chat_id, token, phone, message_id):
+def handle_mgm_flow(chat_id, token, phone):
     try:
         ok, msg = activate_reward_mgm(token, phone)
         if ok:
@@ -361,38 +382,25 @@ def handle_mgm_flow(chat_id, token, phone, message_id):
         for _ in range(20):
             target = generate_random_djezzy_no()
             target_f = format_num(target)
-            
             if send_invitation(token, phone, target_f):
                 time.sleep(0.5)
                 ok, _ = activate_reward_mgm(token, phone)
                 if ok:
                     registered = load_json_file(REGISTERED_NUMBERS_FILE, [])
-                    registered.append({
-                        "sender": phone,
-                        "target": target,
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "offer": "MGM",
-                        "user_id": chat_id
-                    })
+                    registered.append({"sender": phone, "target": target, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "offer": "MGM", "user_id": chat_id})
                     save_json_file(REGISTERED_NUMBERS_FILE, registered)
-                    
                     bot.send_message(chat_id, "🎉 تم تفعيل مكافأة MGM بنجاح! (1GB إضافي)")
                     return True
-                
                 delete_invitation(token, phone, target_f)
                 time.sleep(0.5)
-        
         bot.send_message(chat_id, "❌ وصلت للحد الأقصى من الدعوات اليومي. حاول غداً.")
-        return False
     except Exception as e:
         logging.error(f"خطأ في MGM: {e}")
         bot.send_message(chat_id, "❌ حدث خطأ أثناء معالجة الدعوات.")
-        return False
 
-# ==================== نظام الاشتراكات والمستندات ====================
+# ==================== قنوات الاشتراك والتحقق ====================
 def get_unjoined_channels(user_id):
-    if user_id == ADMIN_ID:
-        return []
+    if user_id == ADMIN_ID: return []
     channels = load_json_file(CHANNELS_FILE, [])
     unjoined = []
     for ch in channels:
@@ -409,86 +417,68 @@ def check_must_join(user_id):
 
 def send_join_msg(chat_id):
     unjoined_channels = get_unjoined_channels(chat_id)
-    if not unjoined_channels:
-        return
+    if not unjoined_channels: return
     markup = types.InlineKeyboardMarkup(row_width=1)
     for ch in unjoined_channels:
         markup.add(types.InlineKeyboardButton(text=ch.get('title', 'قناة'), url=ch.get('link', '#')))
     markup.add(types.InlineKeyboardButton(text="🔄 تم الاشتراك، تأكيد ✅", callback_data="check_subscription"))
     bot.send_message(chat_id, "⚠️ <b>عذراً، يجب عليك الاشتراك في القنوات المتبقية أولاً:</b>", reply_markup=markup)
 
-# ==================== لوحات التحكم والتصميم ====================
 def show_main_menu(chat_id, display_phone):
     markup = types.InlineKeyboardMarkup(row_width=2)
-    buttons = []
-    for off_id, off_info in ALL_OFFERS.items():
-        buttons.append(types.InlineKeyboardButton(text=off_info['name'][:20], callback_data=f"show_{off_id}"))
+    buttons = [types.InlineKeyboardButton(text=off['name'][:20], callback_data=f"show_{oid}") for oid, off in ALL_OFFERS.items()]
     for i in range(0, len(buttons), 2):
-        if i+1 < len(buttons):
-            markup.add(buttons[i], buttons[i+1])
-        else:
-            markup.add(buttons[i])
+        if i+1 < len(buttons): markup.add(buttons[i], buttons[i+1])
+        else: markup.add(buttons[i])
     markup.add(types.InlineKeyboardButton(text="🎁 تفعيل هدايا الدعوات (MGM)", callback_data="activate_mgm"))
     markup.add(types.InlineKeyboardButton(text="💰 فحص الرصيد", callback_data="balance"))
     markup.add(types.InlineKeyboardButton(text="📱 معلومات الشريحة", callback_data="sim_info"))
     markup.add(types.InlineKeyboardButton(text="🔄 تسجيل خروج", callback_data="logout"))
     
-    msg_text = f"✨ <b>مرحباً بك في بوت عروض جيزي المتكامل</b> ✨\n\n📱 الرقم النشط: <code>{mask_phone(display_phone)}</code>\n\nاختر العرض أو الخدمة:"
-    bot.send_message(chat_id, msg_text, reply_markup=markup)
+    bot.send_message(chat_id, f"✨ <b>مرحباً بك في بوت عروض جيزي المتكامل</b> ✨\n\n📱 الرقم النشط: <code>{mask_phone(display_phone)}</code>\n\nاختر العرض أو الخدمة:", reply_markup=markup)
 
-# ==================== معالجات أوامر البوت ====================
+# ==================== أوامر ومعالجات الرسائل ====================
 @bot.message_handler(commands=['start'])
 def start_command(message):
     chat_id = message.chat.id
-    username = message.from_user.username or "No Username"
-    add_user_to_db(chat_id, username)
+    add_user_to_db(chat_id, message.from_user.username)
     
     if MAINTENANCE_MODE:
         bot.send_message(chat_id, MAINTENANCE_MESSAGE)
         return
-
     if not check_must_join(chat_id):
         send_join_msg(chat_id)
         return
 
-    if chat_id in user_sessions:
-        show_main_menu(chat_id, user_sessions[chat_id]['display_phone'])
+    db = load_user_db()
+    user_info = db.get(str(chat_id), {})
+    session_data = user_info.get('session')
+
+    if session_data:
+        show_main_menu(chat_id, session_data['display_phone'])
     else:
-        user_states[chat_id] = "WAITING_PHONE"
-        bot.send_message(
-            chat_id,
-            "✨ <b>مرحباً بك في بوت عروض جيزي</b> ✨\n\n"
-            "📲 يرجى إرسال رقم هاتفك (07XXXXXXXX) للبدء:"
-        )
+        set_user_state(chat_id, "WAITING_PHONE")
+        bot.send_message(chat_id, "✨ <b>مرحباً بك في بوت عروض جيزي</b> ✨\n\n📲 يرجى إرسال رقم هاتفك (07XXXXXXXX) للبدء:")
 
 @bot.message_handler(commands=['info'])
 def info_command(message):
     chat_id = message.chat.id
-    if chat_id not in user_sessions:
+    db = load_user_db()
+    user_info = db.get(str(chat_id), {})
+    session_data = user_info.get('session')
+
+    if not session_data:
         bot.send_message(chat_id, "⚠️ يرجى تسجيل الدخول أولاً عبر /start")
         return
     
-    token = user_sessions[chat_id]['token']
+    token = session_data['token']
     sim_info = get_sim_info(token)
     if not sim_info:
         bot.send_message(chat_id, "❌ فشل جلب معلومات الشريحة.")
         return
-    
-    packages_str = ""
-    for p in sim_info['packages']:
-        packages_str += f"📦 {p['name']} (ينتهي في: {p['expiry']})\n"
-    if not packages_str:
-        packages_str = "لا توجد عروض نشطة."
-        
-    info_msg = (
-        f"📱 <b>معلومات الشريحة:</b>\n"
-        f"👤 الرقم: <code>{sim_info['msisdn']}</code>\n"
-        f"💰 الرصيد المتوفر: <b>{sim_info['balance']} DA</b>\n\n"
-        f"<b>📦 العروض النشطة:</b>\n{packages_str}"
-    )
-    bot.send_message(chat_id, info_msg)
+    packages_str = "".join([f"📦 {p['name']} (ينتهي في: {p['expiry']})\n" for p in sim_info['packages']]) or "لا توجد عروض نشطة."
+    bot.send_message(chat_id, f"📱 <b>معلومات الشريحة:</b>\n👤 الرقم: <code>{sim_info['msisdn']}</code>\n💰 الرصيد المتوفر: <b>{sim_info['balance']} DA</b>\n\n<b>📦 العروض النشطة:</b>\n{packages_str}")
 
-# ==================== استقبال الرسائل النصية (الرقم والـ OTP) ====================
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     chat_id = message.chat.id
@@ -497,53 +487,53 @@ def handle_all_messages(message):
     if MAINTENANCE_MODE:
         bot.send_message(chat_id, MAINTENANCE_MESSAGE)
         return
-    
     if not check_must_join(chat_id):
         send_join_msg(chat_id)
         return
     
-    state = user_states.get(chat_id)
-    
-    # إذا كان مسجلاً بالكامل
-    if chat_id in user_sessions:
+    db = load_user_db()
+    user_info = db.get(str(chat_id), {})
+    state = user_info.get('state')
+    session_data = user_info.get('session')
+
+    if session_data:
         bot.send_message(chat_id, "⚠️ يرجى استخدام القائمة التفاعلية بالضغط على الأزرار بالأسفل.")
         return
         
-    # مرحلة إدخال الرقم
     if state == "WAITING_PHONE" or state is None:
         formatted = format_num(text)
         if len(formatted) == 12 and formatted.startswith("2137"):
             bot.send_message(chat_id, "⏳ جاري إرسال رمز التحقق (OTP)...")
             if request_otp(formatted):
-                user_numbers[chat_id] = formatted
-                user_states[chat_id] = "WAITING_OTP"
+                set_user_phone(chat_id, formatted)
+                set_user_state(chat_id, "WAITING_OTP")
                 bot.send_message(chat_id, f"📥 تم إرسال الرمز إلى <code>{mask_phone(text)}</code>.\n\nالرجاء إدخال الرمز المكون من 6 أرقام:")
             else:
                 bot.send_message(chat_id, "❌ فشل إرسال الرمز. يرجى التأكد من الرقم والمحاولة لاحقاً.")
         else:
-            bot.send_message(chat_id, "❌ الرقم غير صحيح! يرجى إدخال رقم جيزي صالح يبدأ بـ 07 (مثال: 0770123456).")
+            bot.send_message(chat_id, "❌ الرقم غير صحيح! يرجى إدخال رقم جيزي صالح يبدأ بـ 07.")
     
-    # مرحلة إدخال الـ OTP
     elif state == "WAITING_OTP":
         if text.isdigit() and len(text) == 6:
-            msisdn = user_numbers.get(chat_id)
+            msisdn = user_info.get('phone')
+            if not msisdn:
+                bot.send_message(chat_id, "⚠️ حدث خطأ، يرجى إعادة إرسال الرقم من جديد:")
+                set_user_state(chat_id, "WAITING_PHONE")
+                return
+            
             bot.send_message(chat_id, "⏳ جاري تسجيل الدخول وحفظ الجلسة...")
             token = login_with_otp(msisdn, text)
             if token:
-                user_sessions[chat_id] = {
-                    'token': token,
-                    'phone': msisdn,
-                    'display_phone': format_phone(msisdn)
-                }
-                user_states[chat_id] = "LOGGED_IN"
+                display_phone = format_phone(msisdn)
+                set_user_session(chat_id, token, msisdn, display_phone)
                 bot.send_message(chat_id, "✅ تم تسجيل الدخول بنجاح!")
-                show_main_menu(chat_id, format_phone(msisdn))
+                show_main_menu(chat_id, display_phone)
             else:
                 bot.send_message(chat_id, "❌ الرمز الذي أدخلته خاطئ أو منتهي الصلاحية. حاول مجدداً:")
         else:
             bot.send_message(chat_id, "⚠️ يرجى كتابة الرمز المكون من 6 أرقام بشكل صحيح:")
 
-# ==================== معالجة أزرار الكول باك ====================
+# ==================== معالجات الـ Callbacks ====================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
     chat_id = call.message.chat.id
@@ -557,87 +547,61 @@ def callback_query(call):
             bot.answer_callback_query(call.id, "❌ لم تشترك في جميع القنوات بعد!", show_alert=True)
         return
         
-    if chat_id not in user_sessions:
+    db = load_user_db()
+    user_info = db.get(str(chat_id), {})
+    session_data = user_info.get('session')
+
+    if not session_data:
         bot.answer_callback_query(call.id, "⚠️ انتهت جلستك، يرجى تسجيل الدخول مجدداً عبر /start", show_alert=True)
         return
         
-    token = user_sessions[chat_id]['token']
-    phone = user_sessions[chat_id]['phone']
+    token = session_data['token']
+    phone = session_data['phone']
     
     if data.startswith("show_"):
         offer_id = data.replace("show_", "")
         offer = ALL_OFFERS.get(offer_id)
         if offer:
             markup = types.InlineKeyboardMarkup()
-            markup.add(
-                types.InlineKeyboardButton("✅ تأكيد التفعيل", callback_data=f"activate_{offer_id}"),
-                types.InlineKeyboardButton("⬅️ رجوع", callback_data="back_to_menu")
-            )
-            detail_text = (
-                f"ℹ️ <b>تفاصيل العرض:</b>\n\n"
-                f"📌 الاسم: <b>{offer['name']}</b>\n"
-                f"📦 الحجم: <b>{offer['amount']}</b>\n"
-                f"💰 السعر: <b>{offer['price']}</b>\n"
-                f"📅 الصلاحية: <b>{offer['duration']}</b>\n\n"
-                f"⚠️ هل أنت متأكد من رغبتك في تفعيل هذا العرض؟"
-            )
-            bot.edit_message_text(detail_text, chat_id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+            markup.add(types.InlineKeyboardButton("✅ تأكيد التفعيل", callback_data=f"activate_{offer_id}"), types.InlineKeyboardButton("⬅️ رجوع", callback_data="back_to_menu"))
+            bot.edit_message_text(f"ℹ️ <b>تفاصيل العرض:</b>\n\n📌 الاسم: <b>{offer['name']}</b>\n📦 الحجم: <b>{offer['amount']}</b>\n💰 السعر: <b>{offer['price']}</b>\n📅 الصلاحية: <b>{offer['duration']}</b>\n\n⚠️ هل تريد بالتأكيد تفعيل هذا العرض؟", chat_id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     
     elif data.startswith("activate_"):
         offer_id = data.replace("activate_", "")
         if offer_id == "mgm":
             bot.answer_callback_query(call.id, "⏳ جاري تشغيل نظام الدعوات...")
             bot.send_message(chat_id, "⚡ جاري العمل على نظام الدعوات الخاص بك وتفعيل الـ 1GB، قد يستغرق الأمر دقيقة...")
-            threading.Thread(target=handle_mgm_flow, args=(chat_id, token, phone, call.message.message_id)).start()
+            threading.Thread(target=handle_mgm_flow, args=(chat_id, token, phone)).start()
             return
             
         offer = ALL_OFFERS.get(offer_id)
         if offer:
             bot.answer_callback_query(call.id, "⏳ جاري تفعيل العرض...")
-            if offer['offer_id'] == 'offer_1':
-                success, err = activate_2go(token, phone)
-            else:
-                success, err = activate_product_offer(token, phone, offer['code'])
-                
+            success, err = activate_2go(token, phone) if offer['offer_id'] == 'offer_1' else activate_product_offer(token, phone, offer['code'])
             if success:
                 bot.send_message(chat_id, f"🎉 <b>تم تفعيل عرض {offer['name']} بنجاح!</b>")
                 registered = load_json_file(REGISTERED_NUMBERS_FILE, [])
-                registered.append({
-                    "phone": phone,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "offer": offer['name'],
-                    "user_id": chat_id
-                })
+                registered.append({"phone": phone, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "offer": offer['name'], "user_id": chat_id})
                 save_json_file(REGISTERED_NUMBERS_FILE, registered)
             else:
                 bot.send_message(chat_id, f"❌ <b>فشل تفعيل العرض.</b>\nالسبب: {err}")
     
     elif data == "balance":
         bot.answer_callback_query(call.id, "⏳ جاري جلب الرصيد...")
-        success, msg = get_balance(token, phone)
+        _, msg = get_balance(token, phone)
         bot.send_message(chat_id, msg)
         
     elif data == "sim_info":
         bot.answer_callback_query(call.id, "⏳ جاري جلب المعلومات...")
         sim_info = get_sim_info(token)
         if sim_info:
-            packages_str = "".join([f"📦 {p['name']} (ينتهي في: {p['expiry']})\n" for p in sim_info['packages']])
-            if not packages_str:
-                packages_str = "لا توجد عروض نشطة."
-                
-            info_msg = (
-                f"📱 <b>معلومات الشريحة:</b>\n"
-                f"👤 الرقم: <code>{sim_info['msisdn']}</code>\n"
-                f"💰 الرصيد المتوفر: <b>{sim_info['balance']} DA</b>\n\n"
-                f"<b>📦 العروض النشطة:</b>\n{packages_str}"
-            )
-            bot.send_message(chat_id, info_msg)
+            packages_str = "".join([f"📦 {p['name']} (ينتهي في: {p['expiry']})\n" for p in sim_info['packages']]) or "لا توجد عروض نشطة."
+            bot.send_message(chat_id, f"📱 <b>معلومات الشريحة:</b>\n👤 الرقم: <code>{sim_info['msisdn']}</code>\n💰 الرصيد المتوفر: <b>{sim_info['balance']} DA</b>\n\n<b>📦 العروض النشطة:</b>\n{packages_str}")
         else:
             bot.send_message(chat_id, "❌ فشل جلب معلومات الشريحة.")
             
     elif data == "logout":
-        user_sessions.pop(chat_id, None)
-        user_states[chat_id] = "WAITING_PHONE"
+        delete_user_session(chat_id)
         bot.answer_callback_query(call.id, "🔄 تم تسجيل الخروج بنجاح.")
         bot.send_message(chat_id, "🔄 تم تسجيل الخروج بنجاح. أرسل رقمك مجدداً للبدء.")
         
@@ -645,22 +609,6 @@ def callback_query(call):
         bot.delete_message(chat_id, call.message.message_id)
         show_main_menu(chat_id, format_phone(phone))
 
-# ==================== تشغيل الخيوط المتعددة لـ Render ====================
-def start_telegram_polling():
-    """تشغيل البوت في الخلفية واستقبال الرسائل"""
-    print("🤖 Telegram Bot Polling has started...")
-    while True:
-        try:
-            bot.infinity_polling(timeout=20, long_polling_timeout=10)
-        except Exception as e:
-            print(f"⚠️ Polling Error: {e}")
-            time.sleep(5)
-
-# تشغيل خيط التليجرام بمجرد تشغيل السكريبت
-polling_thread = threading.Thread(target=start_telegram_polling, daemon=True)
-polling_thread.start()
-
 if __name__ == '__main__':
-    # لتشغيل السيرفر محلياً
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
